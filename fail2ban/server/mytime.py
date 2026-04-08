@@ -21,9 +21,57 @@ __author__ = "Cyril Jaquier"
 __copyright__ = "Copyright (c) 2004 Cyril Jaquier"
 __license__ = "GPL"
 
+import ast
 import datetime
+import operator
 import re
 import time
+
+
+def _safe_eval_arith(expr):
+	"""Safely evaluate an arithmetic expression string containing only numbers
+	and basic math operators (+, -, *, /, //, **). No function calls, variable
+	references, or other constructs are allowed.
+
+	Raises ValueError if the expression contains disallowed constructs.
+	"""
+	_allowed_operators = {
+		ast.Add: operator.add,
+		ast.Sub: operator.sub,
+		ast.Mult: operator.mul,
+		ast.Div: operator.truediv,
+		ast.FloorDiv: operator.floordiv,
+		ast.Pow: operator.pow,
+		ast.Mod: operator.mod,
+		ast.USub: operator.neg,
+		ast.UAdd: operator.pos,
+	}
+	try:
+		tree = ast.parse(str(expr).strip(), mode='eval')
+	except SyntaxError:
+		raise ValueError("invalid arithmetic expression: %r" % expr)
+
+	def _eval_node(node):
+		if isinstance(node, ast.Expression):
+			return _eval_node(node.body)
+		elif isinstance(node, ast.Constant):
+			if isinstance(node.value, (int, float)):
+				return node.value
+			raise ValueError("disallowed constant type in expression: %r" % type(node.value).__name__)
+		elif isinstance(node, ast.BinOp):
+			op_type = type(node.op)
+			if op_type not in _allowed_operators:
+				raise ValueError("disallowed operator in expression: %s" % op_type.__name__)
+			return _allowed_operators[op_type](_eval_node(node.left), _eval_node(node.right))
+		elif isinstance(node, ast.UnaryOp):
+			op_type = type(node.op)
+			if op_type not in _allowed_operators:
+				raise ValueError("disallowed unary operator in expression: %s" % op_type.__name__)
+			return _allowed_operators[op_type](_eval_node(node.operand))
+		else:
+			raise ValueError("disallowed expression construct: %s" % type(node).__name__)
+
+	return _eval_node(tree)
 
 
 ##
@@ -173,7 +221,7 @@ class MyTime:
 		for rexp, rpl in MyTime._str2sec_parts:
 			val = rexp.sub(rpl, val)
 		val = MyTime._str2sec_fini.sub(r"\1+\2", val)
-		return eval(val)
+		return _safe_eval_arith(val)
 
 	class seconds2str():
 		"""Converts seconds to string on demand (if string representation needed).
