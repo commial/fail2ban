@@ -24,6 +24,7 @@ __copyright__ = "Copyright (c) 2004 Cyril Jaquier, 2011-2012 Lee Clemens, 2012 Y
 __license__ = "GPL"
 
 import ast
+import builtins
 import logging
 import math
 import operator
@@ -42,7 +43,7 @@ logSys = getLogger(__name__)
 _FORMULA_ALLOWED_NAMES = {'banFactor', 'ban'}
 _FORMULA_ALLOWED_BAN_ATTRS = {'Time', 'Count'}
 _FORMULA_ALLOWED_MATH_FUNCS = {
-	'exp', 'log', 'log2', 'log10', 'sqrt', 'ceil', 'floor', 'pow',
+	'exp', 'log', 'log2', 'log10', 'sqrt', 'ceil', 'floor', 'pow'
 }
 _FORMULA_ALLOWED_BUILTINS = {'float', 'int', 'max', 'min', 'abs'}
 
@@ -99,7 +100,7 @@ def _safe_eval_formula(expr_str, ban, banFactor):
 			elif node.id == 'math':
 				return math
 			elif node.id in _FORMULA_ALLOWED_BUILTINS:
-				return __builtins__[node.id] if isinstance(__builtins__, dict) else getattr(__builtins__, node.id)
+				return getattr(builtins, node.id)
 			raise ValueError("disallowed variable in formula: %r" % node.id)
 		elif isinstance(node, ast.Attribute):
 			value = _eval_node(node.value)
