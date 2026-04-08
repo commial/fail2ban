@@ -23,17 +23,137 @@ __author__ = "Cyril Jaquier, Lee Clemens, Yaroslav Halchenko"
 __copyright__ = "Copyright (c) 2004 Cyril Jaquier, 2011-2012 Lee Clemens, 2012 Yaroslav Halchenko"
 __license__ = "GPL"
 
+import ast
 import logging
 import math
+import operator
 import random
 import queue
 
 from .actions import Actions
 from ..helpers import getLogger, _as_bool, extractOptions, MyTime
-from .mytime import MyTime
+from .mytime import MyTime, _safe_eval_arith
 
 # Gets the instance of the logger.
 logSys = getLogger(__name__)
+
+
+# Whitelisted names and attributes for ban time formula evaluation.
+_FORMULA_ALLOWED_NAMES = {'banFactor', 'ban'}
+_FORMULA_ALLOWED_BAN_ATTRS = {'Time', 'Count'}
+_FORMULA_ALLOWED_MATH_FUNCS = {
+	'exp', 'log', 'log2', 'log10', 'sqrt', 'ceil', 'floor', 'pow',
+}
+_FORMULA_ALLOWED_BUILTINS = {'float', 'int', 'max', 'min', 'abs'}
+
+_FORMULA_OPERATORS = {
+	ast.Add: operator.add,
+	ast.Sub: operator.sub,
+	ast.Mult: operator.mul,
+	ast.Div: operator.truediv,
+	ast.FloorDiv: operator.floordiv,
+	ast.Pow: operator.pow,
+	ast.Mod: operator.mod,
+	ast.LShift: operator.lshift,
+	ast.RShift: operator.rshift,
+	ast.USub: operator.neg,
+	ast.UAdd: operator.pos,
+}
+
+_FORMULA_CMP_OPS = {
+	ast.Lt: operator.lt,
+	ast.LtE: operator.le,
+	ast.Gt: operator.gt,
+	ast.GtE: operator.ge,
+	ast.Eq: operator.eq,
+	ast.NotEq: operator.ne,
+}
+
+
+def _safe_eval_formula(expr_str, ban, banFactor):
+	"""Safely evaluate a ban-time formula expression.
+
+	Only allows arithmetic, whitelisted variable access (ban.Time, ban.Count,
+	banFactor), whitelisted math functions, and basic builtins (float, int,
+	max, min).
+
+	Raises ValueError if the expression contains disallowed constructs.
+	"""
+	try:
+		tree = ast.parse(expr_str.strip(), mode='eval')
+	except SyntaxError:
+		raise ValueError("invalid formula expression: %r" % expr_str)
+
+	def _eval_node(node):
+		if isinstance(node, ast.Expression):
+			return _eval_node(node.body)
+		elif isinstance(node, ast.Constant):
+			if isinstance(node.value, (int, float)):
+				return node.value
+			raise ValueError("disallowed constant type in formula: %r" % type(node.value).__name__)
+		elif isinstance(node, ast.Name):
+			if node.id == 'banFactor':
+				return banFactor
+			elif node.id == 'ban':
+				return ban
+			elif node.id == 'math':
+				return math
+			elif node.id in _FORMULA_ALLOWED_BUILTINS:
+				return __builtins__[node.id] if isinstance(__builtins__, dict) else getattr(__builtins__, node.id)
+			raise ValueError("disallowed variable in formula: %r" % node.id)
+		elif isinstance(node, ast.Attribute):
+			value = _eval_node(node.value)
+			if value is ban:
+				if node.attr in _FORMULA_ALLOWED_BAN_ATTRS:
+					return getattr(ban, node.attr)
+				raise ValueError("disallowed ban attribute in formula: %r" % node.attr)
+			elif value is math:
+				if node.attr in _FORMULA_ALLOWED_MATH_FUNCS:
+					return getattr(math, node.attr)
+				raise ValueError("disallowed math function in formula: %r" % node.attr)
+			raise ValueError("disallowed attribute access in formula")
+		elif isinstance(node, ast.BinOp):
+			op_type = type(node.op)
+			if op_type not in _FORMULA_OPERATORS:
+				raise ValueError("disallowed operator in formula: %s" % op_type.__name__)
+			return _FORMULA_OPERATORS[op_type](_eval_node(node.left), _eval_node(node.right))
+		elif isinstance(node, ast.UnaryOp):
+			op_type = type(node.op)
+			if op_type not in _FORMULA_OPERATORS:
+				raise ValueError("disallowed unary operator in formula: %s" % op_type.__name__)
+			return _FORMULA_OPERATORS[op_type](_eval_node(node.operand))
+		elif isinstance(node, ast.Call):
+			func = _eval_node(node.func)
+			if node.keywords:
+				raise ValueError("keyword arguments not allowed in formula")
+			args = [_eval_node(arg) for arg in node.args]
+			# Only allow whitelisted functions
+			if callable(func) and (
+				getattr(func, '__module__', '') == 'math' or
+				getattr(func, '__name__', '') in _FORMULA_ALLOWED_BUILTINS
+			):
+				return func(*args)
+			raise ValueError("disallowed function call in formula")
+		elif isinstance(node, ast.Compare):
+			left = _eval_node(node.left)
+			for op_node, comparator in zip(node.ops, node.comparators):
+				op_type = type(op_node)
+				if op_type not in _FORMULA_CMP_OPS:
+					raise ValueError("disallowed comparison operator in formula: %s" % op_type.__name__)
+				right = _eval_node(comparator)
+				if not _FORMULA_CMP_OPS[op_type](left, right):
+					return False
+				left = right
+			return True
+		elif isinstance(node, ast.IfExp):
+			if _eval_node(node.test):
+				return _eval_node(node.body)
+			else:
+				return _eval_node(node.orelse)
+		else:
+			raise ValueError("disallowed expression construct in formula: %s" % type(node).__name__)
+
+	return _eval_node(tree)
 
 
 class Jail(object):
@@ -246,15 +366,14 @@ class Jail(object):
 				be['evmultipliers'] = [int(i) for i in (value.split(' ') if value is not None and value != '' else [])]
 			# if we have multifiers - use it in lambda, otherwise compile and use formula within lambda
 			multipliers = be.get('evmultipliers', [])
-			banFactor = eval(be.get('factor', "1"))
+			banFactor = _safe_eval_arith(be.get('factor', "1"))
 			if len(multipliers):
 				evformula = lambda ban, banFactor=banFactor: (
 					ban.Time * banFactor * multipliers[ban.Count if ban.Count < len(multipliers) else -1]
 				)
 			else:
 				formula = be.get('formula', 'ban.Time * (1<<(ban.Count if ban.Count<20 else 20)) * banFactor')
-				formula = compile(formula, '~inline-conf-expr~', 'eval')
-				evformula = lambda ban, banFactor=banFactor, formula=formula: max(ban.Time, eval(formula))
+				evformula = lambda ban, banFactor=banFactor, formula=formula: max(ban.Time, _safe_eval_formula(formula, ban, banFactor))
 			# extend lambda with max time :
 			if not be.get('maxtime', None) is None:
 				maxtime = be['maxtime']

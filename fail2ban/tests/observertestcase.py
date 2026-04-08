@@ -176,6 +176,25 @@ class BanTimeIncr(LogCaptureTestCase):
 		a.setBanTimeExtra('rndtime', None)
 
 
+	def testFormulaRCEPrevention(self):
+		a = self.__jail
+		a.setBanTimeExtra('increment', 'true')
+		a.setBanTimeExtra('maxtime', '24h')
+		a.setBanTimeExtra('rndtime', None)
+		a.setBanTimeExtra('multipliers', None)
+		# Malicious factor must be rejected:
+		self.assertRaises(ValueError, a.setBanTimeExtra,
+			'factor', '__import__("os").system("id")')
+		# Malicious formula must be rejected (at evaluation time):
+		a.setBanTimeExtra('factor', None)
+		a.setBanTimeExtra('formula', '__import__("os").system("id")')
+		self.assertRaises(ValueError, a.calcBanTime, 600, 1)
+		# Restore valid formula:
+		a.setBanTimeExtra('formula', 'ban.Time * (1<<(ban.Count if ban.Count<20 else 20)) * banFactor')
+		a.setBanTimeExtra('factor', None)
+		self.assertEqual(a.calcBanTime(600, 1), 1200)
+
+
 class BanTimeIncrDB(LogCaptureTestCase):
 
 	def setUp(self):

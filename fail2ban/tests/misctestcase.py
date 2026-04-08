@@ -458,6 +458,16 @@ class MyTimeTest(unittest.TestCase):
 		self.assertEqual(float(str2sec("1 month")) / 60 / 60 / 24, 30.4375)
 		self.assertEqual(float(str2sec("1 year")) / 60 / 60 / 24, 365.25)
 
+	def testStr2SecondsRCEPrevention(self):
+		str2sec = MyTime.str2seconds
+		# These malicious expressions must be rejected:
+		self.assertRaises(ValueError, str2sec, '__import__("os").system("id")')
+		self.assertRaises(ValueError, str2sec, 'exec("import os")')
+		self.assertRaises(ValueError, str2sec, 'open("/etc/passwd").read()')
+		self.assertRaises(ValueError, str2sec, '().__class__.__bases__[0]')
+		# String constants are not allowed:
+		self.assertRaises(ValueError, str2sec, '"test"')
+
 	def testSec2Str(self):
 		sec2str = lambda s: str(MyTime.seconds2str(s))
 		self.assertEqual(sec2str(86400*390),            '1y 3w 4d')
